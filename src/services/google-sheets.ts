@@ -61,15 +61,8 @@ export async function getLatestTariffsFromDb(): Promise<TariffRow[]> {
     }
 
     if (items.length === 0) return [];
-
-    // Ensure created_at and updated_at fields are present on all rows
-    const withTimestamps = items.map((it) => ({
-        created_at: (it as any).created_at ?? "",
-        updated_at: (it as any).updated_at ?? "",
-        ...it,
-    }));
-
-    return sortTariffsByCoef(withTimestamps);
+    // items already include date field added at save time
+    return sortTariffsByCoef(items);
 }
 
 /**
