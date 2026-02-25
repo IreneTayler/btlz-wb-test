@@ -12,15 +12,15 @@ The goal is to have:
 
 ## Features
 
-- **Frequent WB Box Tariffs fetch**  
-  - Calls `https://common-api.wildberries.ru/api/v1/tariffs/box` every **2 minutes**.
+- **Hourly WB Box Tariffs fetch**  
+  - Calls `https://common-api.wildberries.ru/api/v1/tariffs/box` every **hour**.
   - Stores each tariff row as a separate record in `box_tariff_items`.
   - For each `(date, warehouse)`:
-    - Within a 5‑minute window, the **latest row is updated** every 2 minutes.
-    - After 5 minutes, a **new row is added**, so you retain 5‑minute snapshots for that warehouse.
+    - The **first run of the day** INSERTs one row.
+    - All later runs on the same day only **UPDATE** that row (no extra daily duplicates).
 
 - **Google Sheets sync (stocks_coefs)**  
-  - Every 2 minutes, reads the **latest date’s** rows from `box_tariff_items`.
+  - Every hour, reads the **latest date’s** rows from `box_tariff_items`.
   - Sorts them by coefficient (ascending).
   - Writes them into the `stocks_coefs` sheet in each configured spreadsheet  
     (created automatically if missing).
@@ -52,9 +52,9 @@ The goal is to have:
 
    This starts PostgreSQL and the app. The app runs migrations and seeds, then starts:
 
-   - WB box tariffs fetch every **2 minutes**.
-   - DB updates every **2 minutes**, with a new history row every **5 minutes** per warehouse.
-   - Google Sheets sync every **2 minutes** (if configured).
+   - WB box tariffs fetch every **hour**.
+   - DB updates every **hour**, with at most **one row per (date, warehouse)** per day.
+   - Google Sheets sync every **hour** (if configured).
 
 No other steps are required for WB tariffs; data begins accumulating in PostgreSQL and, if configured, appears in Google Sheets.
 

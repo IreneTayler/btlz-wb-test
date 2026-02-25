@@ -93,8 +93,9 @@ export async function fetchBoxTariffs(forDate: Date): Promise<WbBoxTariffsRespon
 /**
  * Saves or updates box tariffs for the given date (UTC date used as day).
  * Each WB tariff element is stored as its own row in box_tariff_items.
- * - Every 2 minutes: existing rows for the current 5-minute window are updated.
- * - After 5 minutes have passed since the last created_at, a new row is added.
+ * - Fetch runs once an hour.
+ * - For a given (date, warehouse), the first run of the day INSERTs a row.
+ * - Subsequent runs on the same day UPDATE that row (no extra daily duplicates).
  */
 export async function saveBoxTariffsForDate(
     tariffDate: Date,
@@ -109,7 +110,6 @@ export async function saveBoxTariffsForDate(
     await ensureBoxTariffItemsTable();
 
     const now = new Date();
-    const bucketMs = 5 * 60 * 1000; // 5-minute bucket for new rows
 
     await knex.transaction(async (trx) => {
         for (const rawItem of data) {
@@ -124,16 +124,15 @@ export async function saveBoxTariffsForDate(
                 date: dateOnly,
             };
 
-            const lastRow = await trx("box_tariff_items")
+            const existing = await trx("box_tariff_items")
                 .where({
                     tariff_date: dateOnly,
                     warehouse_name: warehouseName,
                 })
-                .orderBy("created_at", "desc")
                 .first();
 
-            if (!lastRow) {
-                // No previous row: insert a new one for this geo/warehouse
+            if (!existing) {
+                // First run for this (date, warehouse): insert
                 await trx("box_tariff_items").insert({
                     tariff_date: dateOnly,
                     geo_name: geoName,
@@ -142,30 +141,14 @@ export async function saveBoxTariffsForDate(
                     created_at: now,
                     updated_at: now,
                 });
-                continue;
-            }
-
-            const createdAt = new Date(lastRow.created_at);
-            const diffMs = now.getTime() - createdAt.getTime();
-
-            if (diffMs < bucketMs) {
-                // Same 5-minute window: update existing row (2-minute refresh)
+            } else {
+                // Later runs on the same day: update existing row only
                 await trx("box_tariff_items")
-                    .where({ id: lastRow.id })
+                    .where({ id: existing.id })
                     .update({
                         data: JSON.stringify(payloadBase),
                         updated_at: now,
                     });
-            } else {
-                // New 5-minute window: add a new row
-                await trx("box_tariff_items").insert({
-                    tariff_date: dateOnly,
-                    geo_name: geoName,
-                    warehouse_name: warehouseName,
-                    data: JSON.stringify(payloadBase),
-                    created_at: now,
-                    updated_at: now,
-                });
             }
         }
     });
