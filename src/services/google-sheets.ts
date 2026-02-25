@@ -39,16 +39,29 @@ export function sortTariffsByCoef(rows: TariffRow[]): TariffRow[] {
 
 /**
  * Returns latest tariff data from DB (latest tariff_date), sorted by coefficient ascending.
+ * Reads from box_tariff_items, where each WB tariff element is stored as its own row.
  */
 export async function getLatestTariffsFromDb(): Promise<TariffRow[]> {
-    const row = await knex("box_tariffs")
-        .orderBy("tariff_date", "desc")
-        .limit(1)
+    const latest = await knex("box_tariff_items")
+        .max("tariff_date as max_date")
         .first();
-    if (!row?.data) return [];
-    const data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
-    if (!Array.isArray(data)) return [];
-    return sortTariffsByCoef(data as TariffRow[]);
+    const maxDate = latest?.max_date as string | Date | undefined;
+    if (!maxDate) return [];
+
+    const rows = await knex("box_tariff_items")
+        .where("tariff_date", maxDate)
+        .select("data");
+
+    const items: TariffRow[] = [];
+    for (const row of rows as { data: unknown }[]) {
+        const d = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+        if (d && typeof d === "object") {
+            items.push(d as TariffRow);
+        }
+    }
+
+    if (items.length === 0) return [];
+    return sortTariffsByCoef(items);
 }
 
 /**
