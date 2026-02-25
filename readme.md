@@ -1,11 +1,29 @@
 # WB Tariffs Service
 
-Service that (1) fetches Wildberries box tariffs hourly and stores them in PostgreSQL per day, and (2) syncs current tariffs to Google Sheets on a schedule.
+This service periodically fetches Wildberries **box tariffs** and:
+
+1. Stores them in **PostgreSQL** with a small history per warehouse.
+2. Regularly exports the latest data to one or more **Google Sheets**.
+
+The goal is to have:
+
+- Up–to–date tariff data in the DB (auto–refreshed).
+- A human–readable view in Google Sheets, sorted by coefficient.
 
 ## Features
 
-- **Hourly WB Box Tariffs**: Fetches from `https://common-api.wildberries.ru/api/v1/tariffs/box`, stores/updates one row per day in the database (same day is overwritten on each hourly run).
-- **Google Sheets sync**: Reads spreadsheet IDs from env or from the `spreadsheets` table, writes latest tariffs to the sheet **stocks_coefs** (created if missing), sorted by coefficient ascending.
+- **Frequent WB Box Tariffs fetch**  
+  - Calls `https://common-api.wildberries.ru/api/v1/tariffs/box` every **2 minutes**.
+  - Stores each tariff row as a separate record in `box_tariff_items`.
+  - For each `(date, warehouse)`:
+    - Within a 5‑minute window, the **latest row is updated** every 2 minutes.
+    - After 5 minutes, a **new row is added**, so you retain 5‑minute snapshots for that warehouse.
+
+- **Google Sheets sync (stocks_coefs)**  
+  - Every 2 minutes, reads the **latest date’s** rows from `box_tariff_items`.
+  - Sorts them by coefficient (ascending).
+  - Writes them into the `stocks_coefs` sheet in each configured spreadsheet  
+    (created automatically if missing).
 
 ## Requirements
 
@@ -24,6 +42,7 @@ Service that (1) fetches Wildberries box tariffs hourly and stores them in Postg
    Edit `.env` and set at least:
 
    - `WB_API_TOKEN` — your Wildberries API token (required).
+   - `SPREADSHEET_IDS` or `SPREADSHEET_ID` — target Google spreadsheet(s) (optional, only if you want Sheets sync).
 
 2. **Run**
 
@@ -33,10 +52,11 @@ Service that (1) fetches Wildberries box tariffs hourly and stores them in Postg
 
    This starts PostgreSQL and the app. The app runs migrations and seeds, then starts:
 
-   - Hourly box-tariffs fetch and save
-   - Periodic sync of tariffs to Google Sheets (if configured)
+   - WB box tariffs fetch every **2 minutes**.
+   - DB updates every **2 minutes**, with a new history row every **5 minutes** per warehouse.
+   - Google Sheets sync every **2 minutes** (if configured).
 
-No other steps are required for WB tariffs; data is stored in the `box_tariffs` table by date.
+No other steps are required for WB tariffs; data begins accumulating in PostgreSQL and, if configured, appears in Google Sheets.
 
 ## Configuration
 
@@ -54,60 +74,87 @@ No other steps are required for WB tariffs; data is stored in the `box_tariffs` 
 | `SPREADSHEET_IDS` | No | Comma-separated spreadsheet IDs to update (overrides DB) |
 | `SPREADSHEET_ID` | No | Single spreadsheet ID (used if `SPREADSHEET_IDS` not set) |
 
-Spreadsheet IDs can also come from the `spreadsheets` table (seed inserts an example row). Env IDs take precedence.
+Spreadsheet IDs can also come from the `spreadsheets` table (seed inserts an example row), but in this project the **recommended way** is to use `SPREADSHEET_IDS` / `SPREADSHEET_ID` in `.env`.
 
 ### Google Sheets
 
 1. Create a Google Cloud project and enable the Google Sheets API.
 2. Create a service account and download its JSON key.
 3. Copy the key into the project root as `service-account.json` (or another path you mount).
-4. In `compose.yaml`, uncomment the `volumes` section under `app` and mount the file, e.g.:
+4. Make sure `compose.yaml` mounts the credentials file (already configured in this repo):
 
    ```yaml
    volumes:
-     - ./service-account.json:/app/service-account.json:ro
+     - ./service_account.json:/app/service_account.json:ro
    ```
 
 5. Share each target spreadsheet with the service account email (Editor).
-6. Set `SPREADSHEET_IDS` or `SPREADSHEET_ID` in `.env`, or add IDs to the `spreadsheets` table.
+6. Set `SPREADSHEET_IDS` or `SPREADSHEET_ID` in `.env` (comma–separated for multiple).
 
-The app will create a sheet named **stocks_coefs** in each spreadsheet if it does not exist, and write tariff data there, sorted by coefficient ascending.
+On startup the app will create (if needed) a sheet named **stocks_coefs** in each spreadsheet and will keep overwriting its contents with the latest tariffs snapshot.
 
 ## Project layout
 
-- `src/app.ts` — Entry: migrations, seeds, then scheduler.
-- `src/scheduler.ts` — Hourly WB job and periodic Sheets sync.
-- `src/services/wb-tariffs.ts` — WB API fetch and DB save.
-- `src/services/google-sheets.ts` — Read tariffs from DB, sort by coefficient, write to Sheets.
-- `src/postgres/migrations/` — Knex migrations (`box_tariffs`, `spreadsheets`).
+- `src/app.ts` — Entry point: runs migrations & seeds, then starts the scheduler.
+- `src/scheduler.ts` — Schedules WB fetch + Sheets sync every 2 minutes.
+- `src/services/wb-tariffs.ts` — Talks to WB API and writes per‑row tariffs to PostgreSQL.
+- `src/services/google-sheets.ts` — Reads latest tariffs from DB, sorts by coefficient, and writes to `stocks_coefs` in Google Sheets.
+- `src/postgres/migrations/` — Knex migrations (`box_tariffs`, `box_tariff_items`, `spreadsheets`, etc.).
 - `src/postgres/seeds/` — Seed for `spreadsheets` (example row).
-- `src/types/wb-tariffs.ts` — Types for WB box tariffs API.
-- `compose.yaml` — PostgreSQL + app services.
-- `example.env` — Example env (no secrets).
+- `src/types/wb-tariffs.ts` — Types for the WB box tariffs API response.
+- `compose.yaml` — Docker Compose config for PostgreSQL + app.
+- `example.env` — Example env file (no secrets).
 - `service-account.json.example` — Example structure for Google credentials (no keys).
 
 ## Database
 
-- **box_tariffs**: `tariff_date` (date, PK), `data` (jsonb), `updated_at`. One row per day; hourly runs update the same day.
-- **spreadsheets**: `spreadsheet_id` (PK). Optional list of Google spreadsheet IDs to sync.
+- **box_tariff_items** (main store):
+  - `id` (PK)
+  - `tariff_date` (date)
+  - `geo_name` (string)
+  - `warehouse_name` (string)
+  - `data` (jsonb) — single WB tariff row plus a `date` field
+  - `created_at` (timestamptz) — when this snapshot row was first inserted
+  - `updated_at` (timestamptz) — last time this row was refreshed within its 5‑minute window
+
+- **box_tariffs**: legacy per‑day aggregate (not actively used in the current flow).
+- **spreadsheets**: `spreadsheet_id` (PK). Optional list of Google spreadsheet IDs (env vars are preferred).
 
 ## Running without Docker
 
-1. Install Node 20+, PostgreSQL, run migrations and seeds (e.g. `npm run knex:dev migrate latest`, `npm run knex:dev seed run`).
-2. Create `.env` from `example.env` and set `WB_API_TOKEN` (and DB/Google vars if needed).
-3. Run:
+1. Install Node 20+ and PostgreSQL.
+2. Create `.env` from `example.env` and set `WB_API_TOKEN`, DB vars, and Google vars if needed.
+3. Run migrations and seeds:
+
+   ```bash
+   npm run knex:dev migrate latest
+   npm run knex:dev seed run
+   ```
+
+4. Start the app:
 
    ```bash
    npm run build && npm run start
-   ```
-
-   Or in development:
-
-   ```bash
+   # or, for dev:
    npm run dev
    ```
 
-## Testing
+## How to verify it’s working
 
-- **WB tariffs**: After `docker compose up`, wait for the first run (runs on startup and then every hour). Check logs for `[WB] Box tariffs fetched and saved.` Query the DB: `SELECT tariff_date, updated_at, jsonb_array_length(data) FROM box_tariffs;`
-- **Google Sheets**: Set `GOOGLE_APPLICATION_CREDENTIALS`, mount `service-account.json`, set `SPREADSHEET_ID` or `SPREADSHEET_IDS`, and ensure the spreadsheet is shared with the service account. Check logs for `[Sheets] Tariffs synced to spreadsheets.` and open the spreadsheet; sheet **stocks_coefs** should contain tariff rows sorted by coefficient.
+- **WB tariffs in DB**  
+  - After `docker compose up`, wait a few minutes.  
+  - Check logs for `[WB] Box tariffs fetched and saved.`  
+  - Inspect DB:
+
+    ```sql
+    SELECT tariff_date, geo_name, warehouse_name, created_at, updated_at
+    FROM box_tariff_items
+    ORDER BY tariff_date DESC, warehouse_name, created_at;
+    ```
+
+- **Google Sheets**  
+  - Ensure `service_account.json` is in place and mounted, and `SPREADSHEET_IDS` / `SPREADSHEET_ID` are set in `.env`.
+  - Check logs for `[Sheets] Tariffs synced to spreadsheets.`  
+  - Open each configured spreadsheet and look for the **stocks_coefs** tab:
+    - You should see a header row with keys like `date`, `geoName`, `warehouseName`, etc.
+    - Data rows beneath it should match the latest `box_tariff_items` entries, sorted by coefficient ascending.
