@@ -1,7 +1,7 @@
 import { fetchAndSaveBoxTariffs } from "#services/wb-tariffs.js";
 import { syncTariffsToAllSpreadsheets } from "#services/google-sheets.js";
 
-const INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
 async function runWbJob(): Promise<void> {
     try {
@@ -22,7 +22,7 @@ async function runSheetsJob(): Promise<void> {
 }
 
 /**
- * Starts hourly WB fetch and hourly Google Sheets sync.
+ * Starts 2-minute WB fetch and 2-minute Google Sheets sync.
  */
 export function startScheduler(): void {
     runWbJob();
