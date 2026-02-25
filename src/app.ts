@@ -1,6 +1,9 @@
-import knex, { migrate, seed } from "#postgres/knex.js";
+import { migrate, seed } from "#postgres/knex.js";
+import { startScheduler } from "#scheduler.js";
 
 await migrate.latest();
 await seed.run();
+console.log("Migrations and seeds done.");
 
-console.log("All migrations and seeds have been run");
+startScheduler();
+console.log("Scheduler started: hourly WB tariffs fetch, periodic Google Sheets sync.");

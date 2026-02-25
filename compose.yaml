@@ -17,11 +17,11 @@ services:
     image: postgres:16.1-alpine
 
     environment:
-      - PGPORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - PGDATA=/var/lib/postgresql/data/pgdata
+      PGPORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-tariffs_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-12345678}
+      PGDATA: /var/lib/postgresql/data/pgdata
 
     volumes:
       - postgres-vol:/var/lib/postgresql/data
@@ -30,10 +30,9 @@ services:
       - postgres-net
 
     expose:
-      - ${POSTGRES_PORT}
-
+      - "5432"
     ports:
-      - ${POSTGRES_PORT}:${POSTGRES_PORT}
+      - "${POSTGRES_PORT:-5432}:5432"
 
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
@@ -52,17 +51,23 @@ services:
       context: .
       dockerfile: Dockerfile
 
+    env_file:
+      - .env
+
     environment:
       POSTGRES_HOST: postgres
-      POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      PORT: ${APP_PORT}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-tariffs_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-12345678}
       NODE_ENV: production
+      WB_API_TOKEN: ${WB_API_TOKEN}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/service_account.json}
+      SPREADSHEET_IDS: ${SPREADSHEET_IDS}
+      SPREADSHEET_ID: ${SPREADSHEET_ID}
 
-    ports:
-      - ${APP_PORT}:${APP_PORT}
+    volumes:
+      - ./service_account.json:/app/service_account.json:ro
 
     depends_on:
       postgres:
@@ -76,5 +81,5 @@ services:
         max-size: 10m
         max-file: 5
 
-    command: [ "npm", "run", "start" ]
+    command: [ "node", "dist/app.js" ]
     restart: unless-stopped
