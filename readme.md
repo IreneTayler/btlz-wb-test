@@ -1,14 +1,10 @@
 # WB Tariff Orchestrator
 
-This service periodically fetches Wildberries **box tariffs** and:
+This service periodically fetches Wildberries **box tariffs**, normalizes them into PostgreSQL, and keeps one or more **Google Sheets** in sync.
 
-1. Stores them in **PostgreSQL** with a small history per warehouse.
-2. Regularly exports the latest data to one or more **Google Sheets**.
-
-The goal is to have:
-
-- Up–to–date tariff data in the DB (auto–refreshed).
-- A human–readable view in Google Sheets, sorted by coefficient.
+- Fetch WB box tariffs on a fixed schedule.
+- Store each tariff row in a normalized schema (typed numeric fields + key/value extension).
+- Push the latest snapshot into Google Sheets as a flat, human‑readable table.
 
 ## Features
 
@@ -129,19 +125,30 @@ On startup the app will create (if needed) a sheet named **stocks_coefs** in eac
 
 ## Database
 
-- **box_tariff_items** (main store, fully normalized):
+- **box_tariff_items** — main, normalized store:
   - `id` (PK)
   - `tariff_date` (date)
-  - `geo_name` (string)
-  - `warehouse_name` (string)
-  - `box_delivery_coef_expr` (string, nullable)
-  - `box_storage_coef_expr` (string, nullable)
-  - `box_delivery_marketplace_coef_expr` (string, nullable)
+  - `geo_name` (text)
+  - `warehouse_name` (text)
+  - `box_delivery_coef` (numeric, nullable)
+  - `box_storage_coef` (numeric, nullable)
+  - `box_delivery_marketplace_coef` (numeric, nullable)
   - `created_at` (timestamptz) — when this snapshot row was first inserted
-  - `updated_at` (timestamptz) — last time this row was refreshed within its 5‑minute window
+  - `updated_at` (timestamptz) — last time this row was refreshed
+  - Unique key on (`tariff_date`, `warehouse_name`) with UPSERT (`ON CONFLICT`) in code.
 
-- **box_tariffs**: legacy per‑day aggregate (not actively used in the current flow).
-- **spreadsheets**: `spreadsheet_id` (PK). Optional list of Google spreadsheet IDs (env vars are preferred).
+- **box_tariff_item_fields** — extension table for *all* WB fields:
+  - `id` (PK)
+  - `box_tariff_item_id` (FK → `box_tariff_items.id`, ON DELETE CASCADE)
+  - `field_key` (text) — original WB field name (e.g. `boxDeliveryBase`, `boxDeliveryLiter`, `boxStorageBase`, …)
+  - `field_value` (text, nullable) — human‑readable value
+  - `value_num` (numeric, nullable) — numeric representation (for searching/sorting)
+  - `value_bool` (boolean, nullable)
+  - `value_json` (jsonb, nullable) — complex objects/arrays
+  - Unique per (`box_tariff_item_id`, `field_key`)
+
+- **spreadsheets**:
+  - `spreadsheet_id` (PK) — optional DB list of Google spreadsheets (env vars are preferred in this project).
 
 ## Running without Docker
 
