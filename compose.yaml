@@ -1,5 +1,5 @@
 # provide a name if you wish
-# name: btlz-test
+# name: wb-tariff-orchestrator
 
 networks:
   postgres-net:
@@ -80,6 +80,13 @@ services:
       options:
         max-size: 10m
         max-file: 5
+
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:${APP_PORT:-3000}/healthz || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
     command: [ "node", "dist/app.js" ]
     restart: unless-stopped

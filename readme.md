@@ -1,4 +1,4 @@
-# WB Tariffs Service
+# WB Tariff Orchestrator
 
 This service periodically fetches Wildberries **box tariffs** and:
 
@@ -50,13 +50,34 @@ The goal is to have:
    docker compose up --build
    ```
 
-   This starts PostgreSQL and the app. The app runs migrations and seeds, then starts:
+   Use `--build` whenever you change code or add migrations so the image includes the latest files.
+
+   This starts PostgreSQL and the app. The app runs **migrations and seeds on startup**, then starts:
 
    - WB box tariffs fetch every **hour**.
    - DB updates every **hour**, with at most **one row per (date, warehouse)** per day.
    - Google Sheets sync every **hour** (if configured).
 
 No other steps are required for WB tariffs; data begins accumulating in PostgreSQL and, if configured, appears in Google Sheets.
+
+### If database changes aren’t applied yet
+
+- **With Docker:** Rebuild the app image so new migrations are in the image, then start the stack. Migrations run automatically when the app starts.
+  ```bash
+  docker compose build app
+  docker compose up -d
+  ```
+  Or run migrations once in a one-off container (same DB, then start the app as usual):
+  ```bash
+  docker compose run --rm app node dist/utils/knex.js migrate:latest
+  ```
+
+- **Without Docker:** Run migrations, then start the app:
+  ```bash
+  npm run knex:dev migrate:latest
+  npm run dev
+  ```
+  (The app also runs `migrate.latest()` on startup, so starting the app is enough if the code is up to date.)
 
 ## Configuration
 
@@ -108,12 +129,14 @@ On startup the app will create (if needed) a sheet named **stocks_coefs** in eac
 
 ## Database
 
-- **box_tariff_items** (main store):
+- **box_tariff_items** (main store, fully normalized):
   - `id` (PK)
   - `tariff_date` (date)
   - `geo_name` (string)
   - `warehouse_name` (string)
-  - `data` (jsonb) — single WB tariff row plus a `date` field
+  - `box_delivery_coef_expr` (string, nullable)
+  - `box_storage_coef_expr` (string, nullable)
+  - `box_delivery_marketplace_coef_expr` (string, nullable)
   - `created_at` (timestamptz) — when this snapshot row was first inserted
   - `updated_at` (timestamptz) — last time this row was refreshed within its 5‑minute window
 
@@ -127,9 +150,10 @@ On startup the app will create (if needed) a sheet named **stocks_coefs** in eac
 3. Run migrations and seeds:
 
    ```bash
-   npm run knex:dev migrate latest
+   npm run knex:dev migrate:latest
    npm run knex:dev seed run
    ```
+   (You can also use `npm run knex:dev migrate latest` with a space.)
 
 4. Start the app:
 
@@ -158,3 +182,14 @@ On startup the app will create (if needed) a sheet named **stocks_coefs** in eac
   - Open each configured spreadsheet and look for the **stocks_coefs** tab:
     - You should see a header row with keys like `date`, `geoName`, `warehouseName`, etc.
     - Data rows beneath it should match the latest `box_tariff_items` entries, sorted by coefficient ascending.
+
+## Health / status
+
+- The app exposes a lightweight HTTP status endpoint (by default on port `APP_PORT` or `3000`):
+
+  - `GET /healthz` or `GET /status`  
+    Returns JSON with:
+    - DB connectivity flag.
+    - Latest `tariff_date` from `box_tariff_items`.
+    - Total number of tariff rows.
+

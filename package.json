@@ -1,7 +1,7 @@
 {
-    "name": "btlz-test",
+    "name": "wb-tariff-orchestrator",
     "version": "1.0.0",
-    "description": "your description",
+    "description": "Service to orchestrate WB box tariffs and Google Sheets sync",
     "main": "app.js",
     "type": "module",
     "scripts": {
@@ -17,7 +17,8 @@
         "prettier": "prettier --config .prettierrc.json src/**/*.js --check",
         "prettier-format": "prettier --config .prettierrc.json src/**/*.js --write",
         "eslint": "eslint",
-        "eslint-fix": "eslint --fix"
+        "eslint-fix": "eslint --fix",
+        "test": "jest"
     },
     "imports": {
         "#*": [

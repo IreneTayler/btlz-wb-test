@@ -1,5 +1,15 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+
+const NODE_ENV = process.env.NODE_ENV ?? "development";
+
+// Load environment-specific file first (if present), then fall back to .env
+dotenv.config({
+    path:
+        NODE_ENV === "production"
+            ? ".env.production"
+            : ".env.development",
+});
 dotenv.config();
 
 const envSchema = z.object({
@@ -24,7 +34,7 @@ const envSchema = z.object({
     SPREADSHEET_IDS: z.union([z.undefined(), z.string()]),
 });
 
-const env = envSchema.parse({
+const rawEnv = {
     POSTGRES_HOST: process.env.POSTGRES_HOST,
     POSTGRES_PORT: process.env.POSTGRES_PORT,
     POSTGRES_DB: process.env.POSTGRES_DB,
@@ -35,7 +45,8 @@ const env = envSchema.parse({
     WB_API_TOKEN: process.env.WB_API_TOKEN,
     GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
     SPREADSHEET_IDS: process.env.SPREADSHEET_IDS,
-});
+};
 
+const env = envSchema.parse(rawEnv);
 
 export default env;

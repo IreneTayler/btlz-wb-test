@@ -1,24 +1,22 @@
 import fs from "fs";
 import { google } from "googleapis";
-import knex from "#postgres/knex.js";
 import env from "#config/env/env.js";
+import type { BoxTariffItemDto, TariffSheetRowDto } from "#types/dtos.js";
+import { getLatestByTariffDate } from "#repositories/box-tariff-items.js";
+import { withRetry } from "#utils/retry.js";
 
 const SHEET_NAME = "stocks_coefs";
 const COEF_KEYS = [
-    // WB box tariffs specific keys (strings with numeric content)
-    "boxDeliveryCoefExpr",
-    "boxStorageCoefExpr",
-    "boxDeliveryMarketplaceCoefExpr",
-    // generic fallbacks
+    "boxDeliveryCoef",
+    "boxStorageCoef",
+    "boxDeliveryMarketplaceCoef",
     "coef",
     "coefficient",
     "coefficientValue",
     "rate",
 ];
 
-type TariffRow = Record<string, string | number | boolean | null | undefined>;
-
-function getCoefValue(row: TariffRow): number {
+function getCoefValue(row: TariffSheetRowDto): number {
     for (const key of COEF_KEYS) {
         const v = row[key];
         if (typeof v === "number" && !Number.isNaN(v)) return v;
@@ -31,44 +29,46 @@ function getCoefValue(row: TariffRow): number {
 }
 
 /**
- * Sorts tariff rows by coefficient ascending (by key coef/coefficient/coefficientValue/rate).
+ * Sorts tariff rows by coefficient ascending.
  */
-export function sortTariffsByCoef(rows: TariffRow[]): TariffRow[] {
+export function sortTariffsByCoef(rows: TariffSheetRowDto[]): TariffSheetRowDto[] {
     return [...rows].sort((a, b) => getCoefValue(a) - getCoefValue(b));
 }
 
-/**
- * Returns latest tariff data from DB (latest tariff_date), sorted by coefficient ascending.
- * Reads from box_tariff_items, where each WB tariff element is stored as its own row.
- */
-export async function getLatestTariffsFromDb(): Promise<TariffRow[]> {
-    const latest = await knex("box_tariff_items")
-        .max("tariff_date as max_date")
-        .first();
-    const maxDate = latest?.max_date as string | Date | undefined;
-    if (!maxDate) return [];
+function dtoToSheetRow(dto: BoxTariffItemDto): TariffSheetRowDto {
+    const base: TariffSheetRowDto = {
+        date: dto.tariff_date,
+        geoName: dto.geo_name,
+        warehouseName: dto.warehouse_name,
+        boxDeliveryCoef: dto.box_delivery_coef,
+        boxStorageCoef: dto.box_storage_coef,
+        boxDeliveryMarketplaceCoef: dto.box_delivery_marketplace_coef,
+    };
 
-    const rows = await knex("box_tariff_items")
-        .where("tariff_date", maxDate)
-        .select("data");
-
-    const items: TariffRow[] = [];
-    for (const row of rows as { data: unknown }[]) {
-        const d = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
-        if (d && typeof d === "object") {
-            items.push(d as TariffRow);
-        }
+    // Include all extra WB fields, including boxDeliveryLiter and others,
+    // from the key/value table.
+    for (const [key, value] of Object.entries(dto.fields)) {
+        if (value === null) continue;
+        base[key] = value;
     }
 
-    if (items.length === 0) return [];
-    // items already include date field added at save time
-    return sortTariffsByCoef(items);
+    return base;
 }
 
 /**
- * Converts tariff rows to sheet rows: header row + data rows (values only, same order as first object keys).
+ * Returns latest tariff data from DB (cached), sorted by coefficient ascending.
  */
-function toSheetRows(rows: TariffRow[]): (string | number)[][] {
+export async function getLatestTariffsFromDb(): Promise<TariffSheetRowDto[]> {
+    const dtos = await getLatestByTariffDate();
+    const rows = dtos.map(dtoToSheetRow);
+    if (rows.length === 0) return [];
+    return sortTariffsByCoef(rows);
+}
+
+/**
+ * Converts tariff rows to sheet rows: header row + data rows.
+ */
+function toSheetRows(rows: TariffSheetRowDto[]): (string | number)[][] {
     if (rows.length === 0) return [];
     const keys = Object.keys(rows[0]);
     const header = keys;
@@ -118,7 +118,9 @@ async function ensureSheetExists(
 /**
  * Updates one spreadsheet's sheet "stocks_coefs" with tariff data from DB.
  */
-export async function updateSpreadsheetWithTariffs(spreadsheetId: string): Promise<void> {
+export async function updateSpreadsheetWithTariffs(
+    spreadsheetId: string
+): Promise<void> {
     const auth = new google.auth.GoogleAuth({
         keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
@@ -138,24 +140,21 @@ export async function updateSpreadsheetWithTariffs(spreadsheetId: string): Promi
     });
 }
 
-/** Resolves spreadsheet IDs only from env (SPREADSHEET_IDS or SPREADSHEET_ID). */
 async function getSpreadsheetIds(): Promise<string[]> {
     const rawList =
         (env.SPREADSHEET_IDS && env.SPREADSHEET_IDS.trim().length > 0
             ? env.SPREADSHEET_IDS
             : process.env.SPREADSHEET_ID ?? "") || "";
-
     const ids = rawList
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean) as string[];
-
     console.log("[Sheets] Resolved spreadsheet IDs from env:", ids);
     return ids;
 }
 
 /**
- * Syncs current tariffs from DB to all configured Google spreadsheets.
+ * Syncs current tariffs from DB to all configured Google spreadsheets (with retry per sheet).
  */
 export async function syncTariffsToAllSpreadsheets(): Promise<void> {
     const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -186,7 +185,11 @@ export async function syncTariffsToAllSpreadsheets(): Promise<void> {
 
     for (const id of spreadsheetIds) {
         try {
-            await updateSpreadsheetWithTariffs(id);
+            await withRetry(() => updateSpreadsheetWithTariffs(id), {
+                maxAttempts: 3,
+                delayMs: 1000,
+                backoff: 2,
+            });
         } catch (e) {
             console.error(`Failed to update spreadsheet ${id}:`, e);
         }
