@@ -2,24 +2,26 @@
 
 This service periodically fetches Wildberries **box tariffs**, normalizes them into PostgreSQL, and keeps one or more **Google Sheets** in sync.
 
-- Fetch WB box tariffs on a fixed schedule.
-- Store each tariff row in a normalized schema (typed numeric fields + key/value extension).
-- Push the latest snapshot into Google Sheets as a flat, human‑readable table.
+- Fetches WB box tariffs on a fixed schedule (hourly + optional daily at 00:01).
+- Stores each tariff row in a **normalized** schema: numeric coefficient columns plus a key/value table for all other WB fields.
+- Pushes the **latest tariff date’s** snapshot into Google Sheets as a flat table, sorted by coefficient.
+
+---
 
 ## Features
 
-- **Hourly WB Box Tariffs fetch**  
-  - Calls `https://common-api.wildberries.ru/api/v1/tariffs/box` every **hour**.
-  - Stores each tariff row as a separate record in `box_tariff_items`.
-  - For each `(date, warehouse)`:
-    - The **first run of the day** INSERTs one row.
-    - All later runs on the same day only **UPDATE** that row (no extra daily duplicates).
+- **WB Box Tariffs fetch (hourly)**  
+  - Calls `https://common-api.wildberries.ru/api/v1/tariffs/box` with a `date` parameter (YYYY-MM-DD).
+  - Uses **retry** with exponential backoff; **Zod** validation of the API response.
+  - Writes to PostgreSQL via **UPSERT** (`ON CONFLICT (tariff_date, warehouse_name) DO UPDATE`).
+  - At most **one row per (tariff_date, warehouse_name)** per day.
 
-- **Google Sheets sync (stocks_coefs)**  
-  - Every hour, reads the **latest date’s** rows from `box_tariff_items`.
-  - Sorts them by coefficient (ascending).
-  - Writes them into the `stocks_coefs` sheet in each configured spreadsheet  
-    (created automatically if missing).
+- **Google Sheets sync**  
+  - **Hourly:** reads the latest `tariff_date` from `box_tariff_items`, sorts rows by coefficient (ascending), and overwrites the **stocks_coefs** sheet in each configured spreadsheet.
+  - **Daily at 00:01** (server local time): same sync, so the sheet is refreshed at the start of each day.
+  - Sheet **stocks_coefs** is created automatically if missing.
+  - Spreadsheet IDs are read from the **spreadsheets** table first; if empty, from env (`SPREADSHEET_IDS` / `SPREADSHEET_ID`).
+  - Each sync **clears** the sheet then writes the current snapshot so no stale rows from previous dates remain.
 
 ## Requirements
 
@@ -88,10 +90,11 @@ No other steps are required for WB tariffs; data begins accumulating in PostgreS
 | `POSTGRES_PASSWORD` | — | Default: `12345678` |
 | `WB_API_TOKEN` | Yes | Wildberries API token |
 | `GOOGLE_APPLICATION_CREDENTIALS` | No | Path to service account JSON (e.g. `/app/service-account.json`) |
-| `SPREADSHEET_IDS` | No | Comma-separated spreadsheet IDs to update (overrides DB) |
-| `SPREADSHEET_ID` | No | Single spreadsheet ID (used if `SPREADSHEET_IDS` not set) |
+| `SPREADSHEET_IDS` | No | Comma-separated spreadsheet IDs (used when `spreadsheets` table is empty) |
+| `SPREADSHEET_ID` | No | Single spreadsheet ID (used when `SPREADSHEET_IDS` is not set) |
+| `TZ` | No | Server timezone for daily 00:01 sync (default `UTC`); e.g. `Europe/Moscow` |
 
-Spreadsheet IDs can also come from the `spreadsheets` table (seed inserts an example row), but in this project the **recommended way** is to use `SPREADSHEET_IDS` / `SPREADSHEET_ID` in `.env`.
+Spreadsheet IDs are resolved **first from the `spreadsheets` table**; if that table is empty or unavailable, the app falls back to `SPREADSHEET_IDS` / `SPREADSHEET_ID` in `.env`. You can store IDs in the DB (e.g. via seed or manual insert) or rely on env.
 
 ### Google Sheets
 
@@ -110,45 +113,89 @@ Spreadsheet IDs can also come from the `spreadsheets` table (seed inserts an exa
 
 On startup the app will create (if needed) a sheet named **stocks_coefs** in each spreadsheet and will keep overwriting its contents with the latest tariffs snapshot.
 
+---
+
+## Google Sheets data format
+
+The **stocks_coefs** sheet is a single table: one **header row** with column names, then one **data row** per warehouse for the **latest** `tariff_date` only. Rows are **sorted by coefficient ascending** (by the first available of: `boxDeliveryCoef`, `boxStorageCoef`, `boxDeliveryMarketplaceCoef`, or other coefficient-like fields).
+
+### Structure
+
+| Aspect | Description |
+|--------|-------------|
+| **Sheet name** | `stocks_coefs` |
+| **Row 1** | Header: column names (see below). |
+| **Row 2+** | Data: one row per tariff item (warehouse), same columns as header. |
+| **Scope** | Only the **latest** `tariff_date` from the DB (no history). |
+| **Order** | Sorted by coefficient (ascending). |
+| **Update** | Full overwrite each sync (sheet is cleared, then rewritten). |
+
+### Column names and types
+
+- **Fixed columns** (always present; come from normalized DB columns):
+
+  | Column | Type | Description |
+  |--------|------|-------------|
+  | `date` | string | Tariff date (YYYY-MM-DD). |
+  | `geoName` | string | WB geo name. |
+  | `warehouseName` | string | WB warehouse name. |
+  | `boxDeliveryCoef` | number or empty | Delivery coefficient (numeric). |
+  | `boxStorageCoef` | number or empty | Storage coefficient (numeric). |
+  | `boxDeliveryMarketplaceCoef` | number or empty | Delivery marketplace coefficient (numeric). |
+
+- **Additional columns** (from WB API; stored in `box_tariff_item_fields` and exported as-is):
+
+  - Any other field returned by the WB box-tariffs API appears as a column with the **same name** as in the API (e.g. `boxDeliveryLiter`, `boxStorageBase`, `boxDeliveryBase`, `coef`, custom keys).
+  - Values are written as **strings** or **numbers**; booleans are written as `1` or `0`; null/undefined as empty cell.
+
+- **Header row:** The header is derived from the **keys of the first data row**. So the exact list of columns depends on which WB fields exist for that snapshot (fixed columns first, then any extra keys from the key/value store). Column order is consistent for all data rows.
+
+### Example (conceptual)
+
+```
+date       | geoName | warehouseName | boxDeliveryCoef | boxStorageCoef | boxDeliveryMarketplaceCoef | boxDeliveryLiter | ...
+-----------|---------|---------------|-----------------|----------------|----------------------------|------------------|----
+2026-03-04 | ...     | ...           | 1.2             | 0.5            | 0.8                        | 100              | ...
+```
+
+The sheet contains **no history**: only the latest date’s snapshot. For full history, query the PostgreSQL database.
+
+---
+
 ## Project layout
 
-- `src/app.ts` — Entry point: runs migrations & seeds, then starts the scheduler.
-- `src/scheduler.ts` — Schedules WB fetch + Sheets sync every 2 minutes.
-- `src/services/wb-tariffs.ts` — Talks to WB API and writes per‑row tariffs to PostgreSQL.
-- `src/services/google-sheets.ts` — Reads latest tariffs from DB, sorts by coefficient, and writes to `stocks_coefs` in Google Sheets.
-- `src/postgres/migrations/` — Knex migrations (`box_tariffs`, `box_tariff_items`, `spreadsheets`, etc.).
-- `src/postgres/seeds/` — Seed for `spreadsheets` (example row).
-- `src/types/wb-tariffs.ts` — Types for the WB box tariffs API response.
-- `compose.yaml` — Docker Compose config for PostgreSQL + app.
-- `example.env` — Example env file (no secrets).
-- `service-account.json.example` — Example structure for Google credentials (no keys).
+| Path | Description |
+|------|-------------|
+| `src/app.ts` | Entry point: runs migrations and seeds, starts HTTP status server and scheduler. |
+| `src/scheduler.ts` | Schedules: hourly WB fetch, hourly Google Sheets sync, daily Sheets sync at 00:01. |
+| `src/services/wb-tariffs.ts` | WB API client: fetch box tariffs (with retry and Zod validation), save via repository. |
+| `src/services/google-sheets.ts` | Reads latest tariffs from DB, sorts by coefficient, clears and writes `stocks_coefs`; spreadsheet IDs from DB or env. |
+| `src/repositories/box-tariff-items.ts` | Repository: UPSERT by (tariff_date, warehouse_name), get latest by tariff_date (with cache). |
+| `src/types/dtos.ts` | DTOs: `BoxTariffItemDto`, `TariffSheetRowDto`, WB row types. |
+| `src/utils/jobs.ts` | Job runner: centralized logging and error handling (no rethrow). |
+| `src/utils/retry.ts` | Retry helper with exponential backoff. |
+| `src/postgres/migrations/` | Knex migrations: `box_tariff_items`, `box_tariff_item_fields`, `spreadsheets`, numeric columns, unique index, CHECK constraints. |
+| `src/postgres/seeds/` | Seed for `spreadsheets` (example row). |
+| `compose.yaml` | Docker Compose: PostgreSQL + app (healthchecks, env, volumes). |
+| `example.env` | Example env file (no secrets). |
+| `jest.config.cjs` / `__tests__/` | Jest config and unit tests (e.g. `retry`, `jobs`). |
+| `.github/workflows/ci.yml` | CI: typecheck, tests, lint, build. |
 
 ## Database
 
-- **box_tariff_items** — main, normalized store:
-  - `id` (PK)
-  - `tariff_date` (date)
-  - `geo_name` (text)
-  - `warehouse_name` (text)
-  - `box_delivery_coef` (numeric, nullable)
-  - `box_storage_coef` (numeric, nullable)
-  - `box_delivery_marketplace_coef` (numeric, nullable)
-  - `created_at` (timestamptz) — when this snapshot row was first inserted
-  - `updated_at` (timestamptz) — last time this row was refreshed
-  - Unique key on (`tariff_date`, `warehouse_name`) with UPSERT (`ON CONFLICT`) in code.
+- **box_tariff_items** — main, normalized store (one row per tariff date + warehouse):
+  - `id` (PK), `tariff_date` (date), `geo_name` (text), `warehouse_name` (text)
+  - `box_delivery_coef`, `box_storage_coef`, `box_delivery_marketplace_coef` (numeric, nullable) — with **CHECK (value IS NULL OR value >= 0)**
+  - `created_at`, `updated_at` (timestamptz)
+  - **Unique** on (`tariff_date`, `warehouse_name`); UPSERT in code via `INSERT ... ON CONFLICT (...) DO UPDATE`.
 
-- **box_tariff_item_fields** — extension table for *all* WB fields:
-  - `id` (PK)
-  - `box_tariff_item_id` (FK → `box_tariff_items.id`, ON DELETE CASCADE)
-  - `field_key` (text) — original WB field name (e.g. `boxDeliveryBase`, `boxDeliveryLiter`, `boxStorageBase`, …)
-  - `field_value` (text, nullable) — human‑readable value
-  - `value_num` (numeric, nullable) — numeric representation (for searching/sorting)
-  - `value_bool` (boolean, nullable)
-  - `value_json` (jsonb, nullable) — complex objects/arrays
-  - Unique per (`box_tariff_item_id`, `field_key`)
+- **box_tariff_item_fields** — key/value store for all other WB fields (typed):
+  - `box_tariff_item_id` (FK → `box_tariff_items.id`), `field_key` (text), `field_value` (text, nullable)
+  - `value_num`, `value_bool`, `value_json` (nullable) for typed storage
+  - Unique per (`box_tariff_item_id`, `field_key`). Used for export to Google Sheets (e.g. `boxDeliveryLiter`, `boxStorageBase`, etc.).
 
 - **spreadsheets**:
-  - `spreadsheet_id` (PK) — optional DB list of Google spreadsheets (env vars are preferred in this project).
+  - `spreadsheet_id` (PK) — list of Google Spreadsheet IDs to sync. If non-empty, the app uses this table; otherwise it uses `SPREADSHEET_IDS` / `SPREADSHEET_ID` from env.
 
 ## Running without Docker
 
@@ -173,22 +220,22 @@ On startup the app will create (if needed) a sheet named **stocks_coefs** in eac
 ## How to verify it’s working
 
 - **WB tariffs in DB**  
-  - After `docker compose up`, wait a few minutes.  
-  - Check logs for `[WB] Box tariffs fetched and saved.`  
-  - Inspect DB:
+  - After `docker compose up`, wait for the first run (see scheduler interval).  
+  - Check logs for `[Job:wb-tariffs] success` and `[WB] Fetched N rows ...` / `[WB] Saved N rows ...`.  
+  - Inspect DB (e.g. from host: `docker compose exec postgres psql -U postgres -d tariffs_db -c "SELECT tariff_date, COUNT(*) FROM box_tariff_items GROUP BY tariff_date ORDER BY tariff_date DESC;"`):
 
     ```sql
-    SELECT tariff_date, geo_name, warehouse_name, created_at, updated_at
+    SELECT tariff_date, geo_name, warehouse_name, box_delivery_coef, created_at, updated_at
     FROM box_tariff_items
-    ORDER BY tariff_date DESC, warehouse_name, created_at;
+    ORDER BY tariff_date DESC, warehouse_name;
     ```
 
 - **Google Sheets**  
-  - Ensure `service_account.json` is in place and mounted, and `SPREADSHEET_IDS` / `SPREADSHEET_ID` are set in `.env`.
-  - Check logs for `[Sheets] Tariffs synced to spreadsheets.`  
-  - Open each configured spreadsheet and look for the **stocks_coefs** tab:
-    - You should see a header row with keys like `date`, `geoName`, `warehouseName`, etc.
-    - Data rows beneath it should match the latest `box_tariff_items` entries, sorted by coefficient ascending.
+  - Ensure `service_account.json` is in place and mounted, and spreadsheet IDs are set (in `spreadsheets` table or `SPREADSHEET_IDS` / `SPREADSHEET_ID` in `.env`).  
+  - Check logs for `[Job:google-sheets-sync] success` and `[Sheets] Resolved spreadsheet IDs from DB` or `... from env`.  
+  - Open each configured spreadsheet → **stocks_coefs** tab:
+    - Header row: `date`, `geoName`, `warehouseName`, `boxDeliveryCoef`, `boxStorageCoef`, `boxDeliveryMarketplaceCoef`, plus any extra WB columns.
+    - Data rows: latest `tariff_date` only, sorted by coefficient ascending.
 
 ## Health / status
 
