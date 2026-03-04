@@ -1,3 +1,7 @@
+/**
+ * Repository for box tariff items: normalized rows in box_tariff_items plus key/value fields in box_tariff_item_fields.
+ * Coefficients are stored in numeric columns; other WB fields in typed key/value table.
+ */
 import knex from "#postgres/knex.js";
 import type {
     WbBoxTariffRow,

@@ -32,7 +32,7 @@ services:
     expose:
       - "5432"
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5433:5432"
 
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
@@ -63,8 +63,9 @@ services:
       NODE_ENV: production
       WB_API_TOKEN: ${WB_API_TOKEN}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/service_account.json}
-      SPREADSHEET_IDS: ${SPREADSHEET_IDS}
-      SPREADSHEET_ID: ${SPREADSHEET_ID}
+      SPREADSHEET_IDS: ${SPREADSHEET_IDS:-}
+      SPREADSHEET_ID: ${SPREADSHEET_ID:-}
+      TZ: ${TZ:-UTC}
 
     volumes:
       - ./service_account.json:/app/service_account.json:ro

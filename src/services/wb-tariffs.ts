@@ -107,8 +107,13 @@ export async function saveBoxTariffsForDate(
     tariffDate: Date,
     data: WbBoxTariffsResponse
 ): Promise<void> {
-    if (!Array.isArray(data) || data.length === 0) return;
+    const dateStr = tariffDate.toISOString().slice(0, 10);
+    if (!Array.isArray(data) || data.length === 0) {
+        console.log(`[WB] No rows to save for ${dateStr}, skipping DB write.`);
+        return;
+    }
     await upsertForDate(tariffDate, data);
+    console.log(`[WB] Saved ${data.length} rows for ${dateStr}.`);
 }
 
 /**
@@ -116,11 +121,14 @@ export async function saveBoxTariffsForDate(
  */
 export async function fetchAndSaveBoxTariffs(): Promise<void> {
     const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
     const data = await withRetry(() => fetchBoxTariffs(now), {
         maxAttempts: 3,
         delayMs: 2000,
         backoff: 2,
     });
+    const count = Array.isArray(data) ? data.length : 0;
+    console.log(`[WB] Fetched ${count} rows for ${dateStr}.`);
     await withRetry(() => saveBoxTariffsForDate(now, data), {
         maxAttempts: 2,
         delayMs: 500,

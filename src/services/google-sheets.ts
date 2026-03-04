@@ -4,6 +4,7 @@ import env from "#config/env/env.js";
 import type { BoxTariffItemDto, TariffSheetRowDto } from "#types/dtos.js";
 import { getLatestByTariffDate } from "#repositories/box-tariff-items.js";
 import { withRetry } from "#utils/retry.js";
+import knex from "#postgres/knex.js";
 
 const SHEET_NAME = "stocks_coefs";
 const COEF_KEYS = [
@@ -132,15 +133,36 @@ export async function updateSpreadsheetWithTariffs(
     const sheetRows = toSheetRows(tariffs);
 
     const range = `${SHEET_NAME}!A:ZZ`;
-    await sheets.spreadsheets.values.update({
+    // Clear the sheet first so we don't leave stale rows from a previous sync
+    // (e.g. when Mar 4 has fewer rows than Mar 3, old Mar 3 rows would otherwise remain).
+    await sheets.spreadsheets.values.clear({
         spreadsheetId,
         range,
+    });
+    await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${SHEET_NAME}!A1`,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: sheetRows },
     });
 }
 
+/**
+ * Returns spreadsheet IDs to sync: from DB table `spreadsheets` first; if empty, from env (SPREADSHEET_IDS / SPREADSHEET_ID).
+ */
 async function getSpreadsheetIds(): Promise<string[]> {
+    try {
+        const rows = await knex("spreadsheets").select("spreadsheet_id");
+        const ids = (rows as { spreadsheet_id: string }[]).map(
+            (r) => r.spreadsheet_id.trim()
+        ).filter(Boolean);
+        if (ids.length > 0) {
+            console.log("[Sheets] Resolved spreadsheet IDs from DB:", ids);
+            return ids;
+        }
+    } catch (e) {
+        console.warn("[Sheets] Could not read spreadsheets from DB, using env:", e);
+    }
     const rawList =
         (env.SPREADSHEET_IDS && env.SPREADSHEET_IDS.trim().length > 0
             ? env.SPREADSHEET_IDS

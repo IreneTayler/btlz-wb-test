@@ -1,6 +1,10 @@
+/** Options for {@link withRetry}. */
 export interface RetryOptions {
+    /** Max number of attempts (default 3). */
     maxAttempts?: number;
+    /** Initial delay in ms before first retry (default 1000). */
     delayMs?: number;
+    /** Backoff multiplier between retries (default 2). */
     backoff?: number;
 }
 
@@ -17,6 +21,11 @@ function sleep(ms: number): Promise<void> {
 /**
  * Runs an async function with retries on failure.
  * Uses exponential backoff: delayMs, delayMs * backoff, delayMs * backoff^2, ...
+ *
+ * @param fn - Async function to run (e.g. API fetch).
+ * @param options - Retry options (maxAttempts, delayMs, backoff).
+ * @returns The result of fn when it succeeds.
+ * @throws The last thrown error if all attempts fail.
  */
 export async function withRetry<T>(
     fn: () => Promise<T>,

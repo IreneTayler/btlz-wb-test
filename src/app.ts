@@ -9,7 +9,7 @@ await seed.run();
 console.log("Migrations and seeds done.");
 
 startScheduler();
-console.log("Scheduler started: hourly WB tariffs fetch, periodic Google Sheets sync.");
+console.log("Scheduler started: hourly WB tariffs fetch, hourly + daily 00:01 Google Sheets sync.");
 
 const port = env.APP_PORT ?? 3000;
 
