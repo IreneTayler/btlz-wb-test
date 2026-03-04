@@ -2,7 +2,7 @@ import { fetchAndSaveBoxTariffs } from "#services/wb-tariffs.js";
 import { syncTariffsToAllSpreadsheets } from "#services/google-sheets.js";
 import { runJob } from "#utils/jobs.js";
 
-const INTERVAL_MS = 60 * 1000; // 1 hour
+const INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const DAILY_HOUR = 0;
 const DAILY_MINUTE = 1; // 00:01 — start of day, after midnight
 
